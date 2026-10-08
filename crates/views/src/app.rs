@@ -90,6 +90,10 @@ pub struct MusicApp {
     /// The previously sung line, which animates back to the normal size.
     pub lyrics_prev_line: Option<usize>,
     pub lyrics_scroll: ScrollHandle,
+    /// Scroll position of the Up next list, kept on the playing song.
+    pub up_next_scroll: UniformListScrollHandle,
+    /// Media controls for the desktop: media keys, Bluetooth earbuds, GNOME's media panel.
+    mpris: Option<mpris::Mpris>,
     /// While set, the lyrics view eases its scroll toward the active line every frame.
     pub lyrics_anim_until: Cell<Option<Instant>>,
     pub lyrics_last_frame: Cell<Option<Instant>>,
@@ -203,6 +207,8 @@ impl MusicApp {
             lyrics_line: None,
             lyrics_prev_line: None,
             lyrics_scroll: ScrollHandle::new(),
+            up_next_scroll: UniformListScrollHandle::new(),
+            mpris: mpris::Mpris::start().inspect_err(|e| eprintln!("toyou: {e}")).ok(),
             lyrics_anim_until: Cell::new(None),
             lyrics_last_frame: Cell::new(None),
             current: None,
@@ -615,6 +621,7 @@ impl MusicApp {
     }
 
     pub(crate) fn sync_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_media_commands(window, cx);
         let Some(player) = &self.player else { return };
         let mut state = player.state();
         if let Some(at) = self.resume_at {
@@ -654,7 +661,65 @@ impl MusicApp {
         }
         self.playback = state;
         self.follow_lyrics(cx);
+        self.report_to_desktop();
         self.save_if_needed();
+    }
+
+    /// Carries out what media keys, earbuds or the desktop's media panel asked for.
+    fn handle_media_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(commands) = self.mpris.as_ref().map(mpris::Mpris::commands) else { return };
+        let playing = !self.playback.paused && !self.playback.idle && self.resume_at.is_none();
+        for command in commands {
+            match command {
+                mpris::Command::PlayPause => self.toggle_pause(),
+                mpris::Command::Play if !playing => self.toggle_pause(),
+                mpris::Command::Pause | mpris::Command::Stop if playing => self.toggle_pause(),
+                mpris::Command::Play | mpris::Command::Pause | mpris::Command::Stop => {}
+                mpris::Command::Next => self.next(cx),
+                mpris::Command::Previous => self.previous(cx),
+                mpris::Command::SetPosition(seconds) => self.seek_to(seconds, cx),
+                mpris::Command::Seek(offset) => self.seek_to(self.playback.position + offset, cx),
+                mpris::Command::SetVolume(volume) => {
+                    let percent = volume * 100.0;
+                    self.volume.update(cx, |slider, cx| slider.set_value(percent as f32, window, cx));
+                    self.with_player(|p| p.set_volume(percent));
+                    self.playback.volume = percent;
+                    cx.notify();
+                }
+                mpris::Command::Raise => window.activate_window(),
+            }
+        }
+    }
+
+    /// Tells the desktop what's playing, for its media panel and media keys.
+    fn report_to_desktop(&mut self) {
+        let track = self.current_track().map(|t| mpris::Track {
+            id: t.video_id.clone(),
+            title: t.title.clone(),
+            artists: t.artists.split([',', '&']).map(str::trim).filter(|a| !a.is_empty()).map(String::from).collect(),
+            album: t.album.clone(),
+            art_url: t.thumbnail.as_deref().map(|url| ui::sized_url(url, 544)),
+            length: if self.playback.duration > 0.0 { self.playback.duration } else { t.duration_secs().unwrap_or(0.0) },
+        });
+        let status = mpris::Status {
+            playing: !self.playback.paused && !self.playback.idle && self.resume_at.is_none(),
+            track,
+            volume: (self.playback.volume / 100.0).clamp(0.0, 1.0),
+        };
+        let position = self.playback.position;
+        if let Some(mpris) = &mut self.mpris {
+            mpris.update(status, position);
+        }
+    }
+
+    /// Jumps to a point in the current song (or where a restored song will resume).
+    pub fn seek_to(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        let seconds = seconds.max(0.0);
+        match &mut self.resume_at {
+            Some(at) => *at = seconds,
+            None => self.with_player(|p| p.seek_to(seconds)),
+        }
+        cx.notify();
     }
 
     /// Poll quicker while synced lyrics are on screen, so line changes land on time.
@@ -755,6 +820,7 @@ impl MusicApp {
         self.lyrics_line = None;
         self.lyrics_prev_line = None;
         self.lyrics_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.reveal_current_song();
         self.load_now_playing_extras(cx);
         self.changed(cx);
     }
@@ -832,12 +898,21 @@ impl MusicApp {
             }
         } else {
             self.navigate(Route::NowPlaying, cx);
+            self.reveal_current_song();
             self.load_now_playing_extras(cx);
+        }
+    }
+
+    /// Scrolls Up next so the playing song is in the middle.
+    pub(crate) fn reveal_current_song(&self) {
+        if let Some(ix) = self.current {
+            self.up_next_scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
     }
 
     pub fn set_now_tab(&mut self, tab: NowTab, cx: &mut Context<Self>) {
         self.now_tab = tab;
+        self.reveal_current_song();
         self.lyrics_line = None; // Re-centers on the current line once the list is laid out.
         self.load_now_playing_extras(cx);
         self.changed(cx);

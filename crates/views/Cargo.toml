@@ -10,6 +10,7 @@ publish = false
 auth.workspace = true
 gpui-kit.workspace = true
 input.workspace = true
+mpris.workspace = true
 music.workspace = true
 player.workspace = true
 router.workspace = true

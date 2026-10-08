@@ -6,8 +6,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use music::Item;
 use state::{Fetch, NowTab};
-use std::time::Duration;
-
 use ui::{Palette, art_tint, mix};
 
 use crate::app::MusicApp;
@@ -86,7 +84,7 @@ impl MusicApp {
                 .into_any_element()
         };
         let body = match self.now_tab {
-            NowTab::UpNext => scroll(self.render_up_next_tab(p, cx)),
+            NowTab::UpNext => self.render_up_next_tab(p, cx),
             NowTab::Lyrics => self.render_lyrics_tab(&track.video_id, p, window, cx),
             NowTab::Related => scroll(self.render_related_tab(&track.video_id, p, cx)),
         };
@@ -111,9 +109,9 @@ impl MusicApp {
                         .overflow_hidden()
                         .shadow(vec![BoxShadow {
                             color: tint.opacity(0.5),
-                            offset: point(px(0.0), px(30.0)),
-                            blur_radius: px(80.0),
-                            spread_radius: px(-20.0),
+                            offset: point(px(0.0), px(24.0)),
+                            blur_radius: px(48.0),
+                            spread_radius: px(-16.0),
                             inset: false,
                         }])
                         .child(self.thumb(track.thumbnail.as_ref(), art, false, p, cx)),
@@ -133,18 +131,35 @@ impl MusicApp {
             .into_any_element()
     }
 
+    /// The queue as a virtual list: only rows on screen are built and drawn, however long the
+    /// queue grows. It scrolls to the playing song (see `MusicApp::reveal_current_song`).
     pub(crate) fn render_up_next_tab(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let playing = !self.playback.paused && !self.playback.idle;
-        let mut list = div().flex().flex_col();
-        for (ix, track) in self.queue.iter().enumerate() {
-            let row = self.render_track_row(50_000 + ix, track, None, p, cx)
-                .when(self.current == Some(ix), |row| row.bg(hsla(0.0, 0.0, 1.0, 0.08)).child(equalizer(playing, p.fg)));
-            list = list.child(row.on_click(cx.listener(move |this, _, _, cx| this.play_index(ix, cx))));
-        }
+        let list = uniform_list(
+            "up-next",
+            self.queue.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                range
+                    .map(|ix| {
+                        let track = this.queue[ix].clone();
+                        this.render_track_row(50_000 + ix, &track, None, p, cx)
+                            // Virtual-list rows don't stretch on their own.
+                            .w_full()
+                            .when(this.current == Some(ix), |row| row.bg(hsla(0.0, 0.0, 1.0, 0.08)).child(equalizer(p.fg)))
+                            .on_click(cx.listener(move |this, _, _, cx| this.play_index(ix, cx)))
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(&self.up_next_scroll)
+        .w_full()
+        .flex_1();
+
         div()
             .flex()
             .flex_col()
             .gap_3()
+            .flex_1()
+            .min_h_0()
             .when_some(self.queue_source.clone(), |el, source| {
                 el.child(
                     div()
@@ -294,8 +309,9 @@ impl MusicApp {
     }
 }
 
-/// Three bouncing bars marking the song that's playing (still while paused).
-fn equalizer(playing: bool, color: Hsla) -> impl IntoElement {
+/// Three bars marking the song that's playing. Static on purpose: an endless animation here
+/// would redraw the whole Now playing view every frame while music plays.
+fn equalizer(color: Hsla) -> impl IntoElement {
     const HEIGHT: f32 = 14.0;
     div()
         .flex()
@@ -303,17 +319,5 @@ fn equalizer(playing: bool, color: Hsla) -> impl IntoElement {
         .gap(px(2.0))
         .h(px(HEIGHT))
         .flex_none()
-        .children([(0.8f32, 0.5f32), (1.0, 0.85), (1.2, 0.4)].into_iter().enumerate().map(move |(ix, (secs, rest))| {
-            let bar = div().w(px(3.0)).rounded_sm().bg(color);
-            if playing {
-                bar.with_animation(
-                    ("equalizer", ix),
-                    Animation::new(Duration::from_secs_f32(secs)).repeat().with_easing(pulsating_between(0.3, 1.0)),
-                    |bar, t| bar.h(px(HEIGHT * t)),
-                )
-                .into_any_element()
-            } else {
-                bar.h(px(HEIGHT * rest)).into_any_element()
-            }
-        }))
+        .children([0.55f32, 1.0, 0.7].map(|level| div().w(px(3.0)).rounded_sm().bg(color).h(px(HEIGHT * level))))
 }

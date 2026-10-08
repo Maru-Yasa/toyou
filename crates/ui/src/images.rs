@@ -13,8 +13,8 @@ use gpui_kit::{Context, Hsla, Image, ImageFormat, Task, hsla};
 
 const FETCH_THREADS: usize = 6;
 /// Loaded images kept in memory; the oldest are evicted beyond this. Covers are requested at
-/// display size (see [`sized_url`]), so 300 of them is only a few tens of MB decoded.
-const MAX_LOADED: usize = 300;
+/// display size (see [`sized_url`]), so 150 of them is only a few MB decoded.
+const MAX_LOADED: usize = 150;
 
 enum Slot {
     Loading,

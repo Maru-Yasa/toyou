@@ -4601,6 +4601,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpris"
+version = "0.1.0"
+dependencies = [
+ "flume",
+ "zbus",
+]
+
+[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8091,6 +8099,7 @@ dependencies = [
  "gpui-kit",
  "icons",
  "input",
+ "libc",
  "views",
  "webview",
 ]
@@ -8477,6 +8486,7 @@ dependencies = [
  "auth",
  "gpui-kit",
  "input",
+ "mpris",
  "music",
  "player",
  "router",

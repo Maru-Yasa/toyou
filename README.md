@@ -48,6 +48,8 @@ Electron.
 - Clicking a song starts a radio of suggestions, and the queue keeps itself filled.
 - Seek, shuffle, and a volume popover with mute.
 - Your queue, song, position and volume are restored when you reopen the app.
+- **Media keys and Bluetooth earbuds** work, and the song shows in your desktop's media
+  controls (MPRIS).
 
 **Keyboard first**
 - **Ctrl+P** searches YouTube Music from anywhere.
@@ -125,6 +127,7 @@ A Cargo workspace with one crate per domain:
 | [`icons`](crates/icons) | Bundled icons |
 | [`music`](crates/music) | YouTube Music client: home, explore, search, pages, radio, lyrics |
 | [`player`](crates/player) | Audio engine: stream lookup, chunked download, decoding, output |
+| [`mpris`](crates/mpris) | Media controls for the desktop: media keys, Bluetooth earbuds, GNOME's media panel |
 | [`auth`](crates/auth) | Session cookies and their validation |
 | [`storage`](crates/storage) | Saves and restores the playback session |
 | [`webview`](crates/webview) | The Google sign-in window (WebKitGTK via wry) |
@@ -137,6 +140,42 @@ cargo test --workspace                             # offline tests
 cargo test --workspace -- --ignored --nocapture    # live tests against YouTube Music
 TOYOU_FPS=1 cargo run --release                    # start with the FPS counter on
 ```
+
+## Memory and performance
+
+Profiled with the [dhat](https://docs.rs/dhat) heap profiler, signed in, with Home loaded and
+no playback.
+
+**toyou's own data is small.** At the end of a 35-second run in a release build, 11.1 MB was
+live in Rust allocations (12.4 MB at the peak). By owner, from a symbolized debug run:
+
+| What | Live |
+| --- | --- |
+| Audio buffer of the current song | ~5 MB |
+| Decoded album art | ~5 MB |
+| Text layout, layout tree, GPU shaders | ~3.5 MB |
+| Downloaded (still encoded) covers | ~0.8 MB |
+
+**The rest of the process memory isn't toyou's data.** The process held about 59 MB of
+private memory at that point, and can reach 100–120 MB after a long session. Most of it is:
+
+- C libraries the profiler can't see: the Mesa/Vulkan GPU driver, fontconfig/freetype and the
+  X11 keyboard libraries.
+- Freed memory that glibc keeps. Drawing allocates and frees a lot of short-lived data:
+  286 MB in 35 seconds, mostly layout (taffy) and text shaping. glibc keeps a pool per thread
+  and holds on to freed pieces.
+
+What toyou does about it:
+
+- On Linux it caps glibc at two memory pools and returns freed memory to the system every 30
+  seconds. This hasn't been measured in a long, visible session yet.
+- Album art is downloaded at the size it's drawn and only once it's on screen. At most 150
+  covers stay in memory.
+- Pages and the sidebar are cached views, so the once-a-second clock tick only redraws the
+  player bar. Up next is a virtual list that only draws the rows on screen.
+
+Press <kbd>F12</kbd> for the FPS counter. While it's on, toyou redraws continuously, so it
+shows the worst case.
 
 ## Limitations
 
