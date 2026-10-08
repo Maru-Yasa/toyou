@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 400" width="1240" height="400" role="img" aria-labelledby="title">
+  <title id="title">toyou</title>
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="512" y2="512">
+      <stop offset="0" stop-color="#1b1b22"/>
+      <stop offset="1" stop-color="#0a0a0d"/>
+    </linearGradient>
+    <linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="140" y1="150" x2="380" y2="370">
+      <stop offset="0" stop-color="#ff5d4f"/>
+      <stop offset="1" stop-color="#ffb648"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(44 44) scale(0.609)">
+    <rect width="512" height="512" rx="116" fill="url(#tile)"/>
+    <g transform="translate(-12 0)" fill="none" stroke="url(#mark)" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M150 186 L150 326 L270 256 Z" fill="url(#mark)" stroke-width="36"/>
+      <path d="M323.7 177 A118 118 0 0 1 323.7 335" stroke-width="30"/>
+      <path d="M366.8 138.2 A176 176 0 0 1 366.8 373.8" stroke-width="24"/>
+    </g>
+  </g>
+  <text x="404" y="262" font-family="Ubuntu, 'Noto Sans', 'DejaVu Sans', sans-serif" font-size="196" font-weight="700" fill="#f2f2f4">toyou</text>
+</svg>

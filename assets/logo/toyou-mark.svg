@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="120 120 272 272" width="24" height="24" role="img" aria-labelledby="title">
+  <title id="title">toyou</title>
+  <!-- One-color mark; takes the surrounding text color. -->
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M150 186 L150 326 L270 256 Z" fill="currentColor" stroke-width="36"/>
+    <path d="M323.7 177 A118 118 0 0 1 323.7 335" stroke-width="30"/>
+    <path d="M366.8 138.2 A176 176 0 0 1 366.8 373.8" stroke-width="24"/>
+  </g>
+</svg>
