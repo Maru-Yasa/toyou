@@ -3,6 +3,7 @@ name = "views"
 description = "The app state and its screens."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

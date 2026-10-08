@@ -11,6 +11,7 @@ Built in Rust on [GPUI Kit](https://gpui-kit.com) (Zed's GPU-accelerated UI fram
 ![GPUI Kit](https://img.shields.io/badge/UI-GPUI%20Kit-ffb648?style=flat-square)
 ![Linux](https://img.shields.io/badge/tested%20on-Linux-1b1b22?style=flat-square&logo=linux&logoColor=white)
 ![No mpv, no yt-dlp](https://img.shields.io/badge/runtime%20deps-none-1b1b22?style=flat-square)
+![MIT license](https://img.shields.io/badge/license-MIT-1b1b22?style=flat-square)
 
 </div>
 
@@ -19,6 +20,13 @@ Built in Rust on [GPUI Kit](https://gpui-kit.com) (Zed's GPU-accelerated UI fram
 toyou plays YouTube Music without a browser tab. It talks to YouTube Music directly, plays
 audio with its own engine, and draws everything with the GPU. It needs no mpv, no yt-dlp and no
 Electron.
+
+<p align="center">
+  <img src="assets/screenshots/now-playing.png" alt="toyou's Now playing view: large album art tinted into the background, with the Up next queue on the right" width="100%">
+</p>
+<p align="center">
+  <img src="assets/screenshots/home.png" alt="toyou's Home page: Listen again picks, the playlists sidebar and the player bar" width="100%">
+</p>
 
 ## Features
 
@@ -145,4 +153,4 @@ Google or YouTube. "YouTube" and "YouTube Music" are trademarks of Google LLC.
 
 ## License
 
-No license has been chosen yet. Until one is added, all rights are reserved by the author.
+[MIT](LICENSE) © 2026 Maru-Yasa

@@ -3,6 +3,7 @@ name = "router"
 description = "The pages toyou can show."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

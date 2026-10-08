@@ -3,6 +3,7 @@ name = "state"
 description = "Plain state types shared by the views."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

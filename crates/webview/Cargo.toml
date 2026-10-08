@@ -3,6 +3,7 @@ name = "webview"
 description = "The Google sign-in window (WebKitGTK via wry)."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
