@@ -1,0 +1,11 @@
+[package]
+name = "webview"
+description = "The Google sign-in window (WebKitGTK via wry)."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+auth.workspace = true
+tao.workspace = true
+wry.workspace = true

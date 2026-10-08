@@ -1,9 +1,7 @@
-//! YouTube Music sign-in. There is no embedded browser, so we reuse the session of a
-//! browser the user is already signed into: yt-dlp extracts its cookies into a
-//! Netscape cookie file.
+//! YouTube Music sign-in: the session's cookies, stored as a Netscape cookie file. They come
+//! from the sign-in window (the `webview` crate) or from a pasted `Cookie` header.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const ORIGIN: &str = "https://music.youtube.com";
@@ -11,17 +9,6 @@ pub const ORIGIN: &str = "https://music.youtube.com";
 /// Exit codes of the `toyou-login` sign-in window, read by the main app.
 pub const LOGIN_EXIT_SIGNED_IN: i32 = 0;
 pub const LOGIN_EXIT_CANCELLED: i32 = 2;
-
-/// Browsers yt-dlp knows how to read cookies from: (label, yt-dlp name).
-pub const BROWSERS: &[(&str, &str)] = &[
-    ("Firefox", "firefox"),
-    ("Chrome", "chrome"),
-    ("Chromium", "chromium"),
-    ("Brave", "brave"),
-    ("Edge", "edge"),
-    ("Vivaldi", "vivaldi"),
-    ("Opera", "opera"),
-];
 
 /// One cookie, as stored in a Netscape cookie file.
 pub struct CookieRecord {
@@ -45,40 +32,6 @@ impl Session {
     /// The previously saved session, if any.
     pub fn load() -> Option<Self> {
         Self::from_cookie_file(&cookie_path()).ok()
-    }
-
-    pub fn import_from_browser(browser: &str) -> Result<Self, String> {
-        let target = cookie_path();
-        let tmp = target.with_extension("tmp");
-        let _ = std::fs::remove_file(&tmp);
-        if let Some(dir) = tmp.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-
-        // `--cookies` makes yt-dlp dump its cookie jar (including the browser's cookies)
-        // to that file on exit. Any quick public video works as the request.
-        let output = Command::new("yt-dlp")
-            .args(["--cookies-from-browser", browser, "--cookies"])
-            .arg(&tmp)
-            .args(["--skip-download", "--no-warnings", "--quiet", "https://www.youtube.com/watch?v=jNQXAC9IVRw"])
-            .output()
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => "yt-dlp isn't installed. Install it (`sudo apt install yt-dlp` or \
-                    `pip install -U yt-dlp`), or paste a Cookie header below."
-                    .to_string(),
-                _ => format!("failed to run yt-dlp: {e}"),
-            })?;
-
-        // yt-dlp dumps the browser's entire cookie jar; keep only YouTube's cookies.
-        let records = read_cookie_file(&tmp);
-        let _ = std::fs::remove_file(&tmp);
-        Self::save_cookies(&records).map_err(|err| {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            match stderr.lines().rev().find(|l| l.contains("ERROR")) {
-                Some(line) => line.trim().to_string(),
-                None => err,
-            }
-        })
     }
 
     /// Accepts the value of a `Cookie:` request header copied from the browser dev tools.
@@ -157,7 +110,7 @@ fn read_cookie_file(path: &Path) -> Vec<CookieRecord> {
     let Ok(contents) = std::fs::read_to_string(path) else { return Vec::new() };
     contents
         .lines()
-        // yt-dlp writes HttpOnly cookies with this prefix; they are still cookies.
+        // Cookie files mark HttpOnly cookies with this prefix; they are still cookies.
         .map(|line| line.strip_prefix("#HttpOnly_").unwrap_or(line))
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| {

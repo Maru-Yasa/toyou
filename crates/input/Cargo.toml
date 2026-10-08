@@ -1,0 +1,9 @@
+[package]
+name = "input"
+description = "Actions and key bindings."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui-kit.workspace = true

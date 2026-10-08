@@ -1,0 +1,12 @@
+[package]
+name = "ui"
+description = "Shared UI building blocks."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+flume.workspace = true
+gpui-kit.workspace = true
+image.workspace = true
+ureq.workspace = true

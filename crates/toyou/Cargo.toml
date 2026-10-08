@@ -1,0 +1,15 @@
+[package]
+name = "toyou"
+description = "A lightweight YouTube Music desktop client built on GPUI Kit."
+version.workspace = true
+edition.workspace = true
+publish = false
+default-run = "toyou"
+
+[dependencies]
+gpui-kit.workspace = true
+icons.workspace = true
+input.workspace = true
+views.workspace = true
+# Only the `toyou-login` binary uses this, so the main app never links WebKit/GTK.
+webview.workspace = true

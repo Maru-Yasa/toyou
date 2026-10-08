@@ -3,19 +3,22 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::Track;
+use music::Track;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SavedState {
     pub queue: Vec<Track>,
     pub current: Option<usize>,
+    /// What the queue plays from (shown in Now playing).
+    #[serde(default)]
+    pub source: Option<String>,
     /// Seconds into the current song.
     pub position: f64,
     pub volume: f64,
 }
 
 fn path() -> Option<std::path::PathBuf> {
-    crate::auth::config_dir().map(|dir| dir.join("state.json"))
+    auth::config_dir().map(|dir| dir.join("state.json"))
 }
 
 pub fn load() -> Option<SavedState> {
@@ -63,13 +66,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("toyou-persist-test-{}", std::process::id()));
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
 
-        save(&SavedState { queue: vec![track("a", "3:00"), track("b", "4:00")], current: Some(1), position: 42.5, volume: 55.0 });
+        save(&SavedState {
+            queue: vec![track("a", "3:00"), track("b", "4:00")],
+            current: Some(1),
+            source: Some("Test mix".into()),
+            position: 42.5,
+            volume: 55.0,
+        });
         let restored = load().expect("state file");
         assert_eq!(restored.queue.len(), 2);
         assert_eq!(restored.queue[1].video_id, "b");
         assert_eq!(restored.current, Some(1));
         assert_eq!(restored.position, 42.5);
         assert_eq!(restored.volume, 55.0);
+        assert_eq!(restored.source.as_deref(), Some("Test mix"));
 
         // A stale index past the end of the queue is dropped.
         save(&SavedState { queue: vec![track("a", "3:00")], current: Some(5), ..Default::default() });

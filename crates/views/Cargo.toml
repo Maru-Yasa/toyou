@@ -1,0 +1,17 @@
+[package]
+name = "views"
+description = "The app state and its screens."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+auth.workspace = true
+gpui-kit.workspace = true
+input.workspace = true
+music.workspace = true
+player.workspace = true
+router.workspace = true
+state.workspace = true
+storage.workspace = true
+ui.workspace = true

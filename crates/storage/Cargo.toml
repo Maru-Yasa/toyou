@@ -1,0 +1,12 @@
+[package]
+name = "storage"
+description = "Saves and restores the playback session across restarts."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+auth.workspace = true
+music.workspace = true
+serde.workspace = true
+serde_json.workspace = true

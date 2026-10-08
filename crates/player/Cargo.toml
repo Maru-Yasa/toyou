@@ -1,0 +1,12 @@
+[package]
+name = "player"
+description = "toyou's audio player: InnerTube streams, symphonia and rodio."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+flume.workspace = true
+rodio.workspace = true
+serde_json.workspace = true
+ureq.workspace = true

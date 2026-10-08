@@ -1,0 +1,9 @@
+[package]
+name = "icons"
+description = "The icons toyou draws."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui-kit.workspace = true

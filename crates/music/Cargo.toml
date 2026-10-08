@@ -1,0 +1,12 @@
+[package]
+name = "music"
+description = "A small YouTube Music (InnerTube) client."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+auth.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true

@@ -1,19 +1,37 @@
-[package]
-name = "toyou"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# `cargo run` / `cargo build` default to the app (which also builds `toyou-login`).
+default-members = ["crates/toyou"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-default-run = "toyou"
 
-[dependencies]
-gpui-kit = "0.7.1"
+[workspace.dependencies]
+auth = { path = "crates/auth" }
+icons = { path = "crates/icons" }
+input = { path = "crates/input" }
+music = { path = "crates/music" }
+player = { path = "crates/player" }
+router = { path = "crates/router" }
+state = { path = "crates/state" }
+storage = { path = "crates/storage" }
+ui = { path = "crates/ui" }
+views = { path = "crates/views" }
+webview = { path = "crates/webview" }
+
 flume = "0.12"
-serde_json = "1"
-ureq = { version = "2", features = ["json"] }
-sha1_smol = "1"
-wry = "0.57"
-tao = "0.37.1"
+gpui-kit = "0.7.1"
+# Already built for gpui; used to sample album-art colors.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 rodio = { version = "0.22", default-features = false, features = ["playback", "mp4"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1_smol = "1"
+tao = "0.37.1"
+ureq = { version = "2", features = ["json"] }
+wry = "0.57"
 
 [profile.release]
 lto = "thin"

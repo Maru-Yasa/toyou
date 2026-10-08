@@ -1,0 +1,9 @@
+[package]
+name = "auth"
+description = "Signing in to YouTube Music: the session and its cookies."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+sha1_smol.workspace = true

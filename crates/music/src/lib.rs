@@ -6,10 +6,13 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::auth::{ORIGIN, Session};
+use auth::{ORIGIN, Session};
 
 const API: &str = "https://music.youtube.com/youtubei/v1";
 const CLIENT_VERSION: &str = "1.20250101.01.00";
+/// The Android YouTube Music client gets time-synced lyrics, which the web client doesn't.
+const ANDROID_CLIENT_VERSION: &str = "7.27.52";
+const ANDROID_USER_AGENT: &str = "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 14) gzip";
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,6 +95,46 @@ impl Page {
     }
 }
 
+/// A song's "Up next" queue and where it plays from (e.g. "Giorgio by Moroder Mix").
+#[derive(Clone, Debug, Default)]
+pub struct UpNext {
+    pub tracks: Vec<Track>,
+    pub source: Option<String>,
+}
+
+/// Browse IDs for a song's Lyrics and Related tabs, when YouTube Music has them.
+#[derive(Clone, Debug, Default)]
+pub struct WatchInfo {
+    pub lyrics_id: Option<String>,
+    pub related_id: Option<String>,
+}
+
+/// One line of lyrics; `start_ms` is set when the lyrics are time-synced.
+#[derive(Clone, Debug)]
+pub struct LyricLine {
+    pub text: String,
+    pub start_ms: Option<u64>,
+}
+
+/// Lyrics as served by YouTube Music, with their source credit.
+#[derive(Clone, Debug)]
+pub struct Lyrics {
+    pub lines: Vec<LyricLine>,
+    pub source: String,
+}
+
+impl Lyrics {
+    /// Whether the lines carry timestamps, so they can follow playback.
+    pub fn synced(&self) -> bool {
+        self.lines.iter().any(|line| line.start_ms.is_some())
+    }
+
+    /// The line being sung at `position_ms`, for synced lyrics.
+    pub fn line_at(&self, position_ms: u64) -> Option<usize> {
+        self.lines.iter().rposition(|line| line.start_ms.is_some_and(|start| start <= position_ms))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Account {
     pub name: String,
@@ -132,6 +175,26 @@ impl Client {
                 ureq::Error::Status(401 | 403, _) => "YouTube rejected the session; try signing in again".into(),
                 e => e.to_string(),
             })?
+            .into_json()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Like `post`, but as the Android YouTube Music app (unauthenticated).
+    fn post_android(&self, endpoint: &str, mut body: Value) -> Result<Value, String> {
+        body["context"] = json!({
+            "client": {
+                "clientName": "ANDROID_MUSIC",
+                "clientVersion": ANDROID_CLIENT_VERSION,
+                "androidSdkVersion": 34,
+                "hl": "en",
+            }
+        });
+        ureq::post(&format!("{API}/{endpoint}?prettyPrint=false"))
+            .set("User-Agent", ANDROID_USER_AGENT)
+            .set("X-YouTube-Client-Name", "21")
+            .set("X-YouTube-Client-Version", ANDROID_CLIENT_VERSION)
+            .send_json(body)
+            .map_err(|e| e.to_string())?
             .into_json()
             .map_err(|e| e.to_string())
     }
@@ -257,6 +320,11 @@ impl Client {
 
     /// "Up next" for a song or playlist: a radio of suggestions, or the playlist's queue.
     pub fn up_next(&self, video_id: Option<&str>, playlist_id: Option<&str>) -> Result<Vec<Track>, String> {
+        self.up_next_queue(video_id, playlist_id).map(|queue| queue.tracks)
+    }
+
+    /// Like [`Client::up_next`], plus the name of what the queue plays from.
+    pub fn up_next_queue(&self, video_id: Option<&str>, playlist_id: Option<&str>) -> Result<UpNext, String> {
         let mut body = json!({ "isAudioOnly": true, "enablePersistentPlaylistPanel": true });
         if let Some(video_id) = video_id {
             body["videoId"] = json!(video_id);
@@ -268,19 +336,78 @@ impl Client {
             body["playlistId"] = json!(playlist_id);
         }
         let response = self.post("next", body)?;
-        let items = response
-            .pointer("/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/watchNextTabbedResultsRenderer/tabs/0/tabRenderer/content/musicQueueRenderer/content/playlistPanelRenderer/contents")
+        let queue = response.pointer(
+            "/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/watchNextTabbedResultsRenderer/tabs/0/tabRenderer/content/musicQueueRenderer",
+        );
+        let items = queue
+            .and_then(|q| q.pointer("/content/playlistPanelRenderer/contents"))
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        Ok(items
+        let tracks = items
             .iter()
             .filter_map(|item| {
                 item.get("playlistPanelVideoRenderer")
                     .or_else(|| item.pointer("/playlistPanelVideoWrapperRenderer/primaryRenderer/playlistPanelVideoRenderer"))
             })
             .filter_map(parse_panel_video)
-            .collect())
+            .collect();
+        let source = queue
+            .map(|q| runs_text(q.pointer("/header/musicQueueHeaderRenderer/subtitle")))
+            .filter(|s| !s.is_empty());
+        Ok(UpNext { tracks, source })
+    }
+
+    /// Finds where a song's Lyrics and Related tabs live.
+    pub fn watch_info(&self, video_id: &str) -> Result<WatchInfo, String> {
+        let response = self.post("next", json!({ "videoId": video_id, "isAudioOnly": true }))?;
+        let tabs = response
+            .pointer("/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/watchNextTabbedResultsRenderer/tabs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let browse_id = |prefix: &str| {
+            tabs.iter()
+                .filter(|tab| tab.pointer("/tabRenderer/unselectable").and_then(Value::as_bool) != Some(true))
+                .filter_map(|tab| tab.pointer("/tabRenderer/endpoint/browseEndpoint/browseId")?.as_str())
+                .find(|id| id.starts_with(prefix))
+                .map(String::from)
+        };
+        Ok(WatchInfo { lyrics_id: browse_id("MPLY"), related_id: browse_id("MPTR") })
+    }
+
+    /// The lyrics for a song (from [`WatchInfo::lyrics_id`]): time-synced when YouTube Music
+    /// has them, otherwise plain text. `None` if the song has no lyrics.
+    pub fn lyrics(&self, browse_id: &str) -> Result<Option<Lyrics>, String> {
+        if let Ok(Some(lyrics)) = self.timed_lyrics(browse_id) {
+            return Ok(Some(lyrics));
+        }
+        let response = self.post("browse", json!({ "browseId": browse_id }))?;
+        let Some(shelf) = find_key(&response, "musicDescriptionShelfRenderer") else { return Ok(None) };
+        let text = runs_text(shelf.get("description"));
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let lines = text.lines().map(|line| LyricLine { text: line.to_string(), start_ms: None }).collect();
+        Ok(Some(Lyrics { lines, source: runs_text(shelf.get("footer")) }))
+    }
+
+    fn timed_lyrics(&self, browse_id: &str) -> Result<Option<Lyrics>, String> {
+        let response = self.post_android("browse", json!({ "browseId": browse_id }))?;
+        let Some(data) = find_key(&response, "timedLyricsData").and_then(Value::as_array) else { return Ok(None) };
+        let lines: Vec<LyricLine> = data
+            .iter()
+            .filter_map(|line| {
+                let start = line.pointer("/cueRange/startTimeMilliseconds")?;
+                let start_ms = start.as_u64().or_else(|| start.as_str()?.parse().ok());
+                Some(LyricLine { text: line.get("lyricLine")?.as_str()?.to_string(), start_ms })
+            })
+            .collect();
+        if lines.is_empty() {
+            return Ok(None);
+        }
+        let source = find_key(&response, "sourceMessage").and_then(Value::as_str).unwrap_or_default().to_string();
+        Ok(Some(Lyrics { lines, source }))
     }
 
     pub fn account(&self) -> Result<Account, String> {
@@ -307,6 +434,8 @@ fn parse_page(response: &Value) -> Page {
     let tab_contents = response
         .pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
         .or_else(|| response.pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents"))
+        // Related-songs pages are a bare section list.
+        .or_else(|| response.pointer("/contents/sectionListRenderer/contents"))
         .and_then(Value::as_array);
     if let Some(contents) = tab_contents {
         for section in contents {
@@ -553,6 +682,28 @@ mod tests {
         let explore = client.explore().unwrap();
         summarize(&explore);
         assert!(explore.sections.iter().any(|s| s.items.iter().any(|i| matches!(i, Item::Card(c) if c.chip))));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_now_playing_extras() {
+        let client = Client::default();
+        let queue = client.up_next_queue(Some("ZFZM6jDTWd4"), None).unwrap();
+        println!("playing from: {:?}, {} tracks", queue.source, queue.tracks.len());
+        assert!(queue.source.is_some());
+        let info = client.watch_info("ZFZM6jDTWd4").unwrap();
+        let lyrics = client.lyrics(info.lyrics_id.as_deref().expect("lyrics tab")).unwrap().expect("lyrics");
+        // Only report the shape; lyrics text is not printed.
+        println!("lyrics: {} lines, synced: {}, {}", lyrics.lines.len(), lyrics.synced(), lyrics.source);
+        assert!(lyrics.lines.len() > 5);
+        assert!(lyrics.synced(), "expected time-synced lyrics");
+        let starts: Vec<u64> = lyrics.lines.iter().filter_map(|l| l.start_ms).collect();
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]), "timestamps in order");
+        assert_eq!(lyrics.line_at(0), None);
+        assert_eq!(lyrics.line_at(u64::MAX), Some(lyrics.lines.len() - 1));
+        let related = client.browse(info.related_id.as_deref().expect("related tab"), None).unwrap();
+        summarize(&related);
+        assert!(related.sections.len() >= 2);
     }
 
     #[test]

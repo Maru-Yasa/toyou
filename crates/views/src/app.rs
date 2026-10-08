@@ -1,8 +1,8 @@
 //! Application state and behavior: navigation, sign-in, and the playback queue.
-//! Rendering lives in `ui.rs`.
+//! Rendering lives in the sibling modules (`root`, `pages`, `now_playing`, …).
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,66 +10,15 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::*;
 
-use crate::api::{Account, Card, Client, Item, Page, Target, Track};
-use crate::auth::Session;
-use crate::images::ImageCache;
-use crate::player::{PlaybackState, Player};
+use auth::Session;
+use music::{Account, Card, Client, Item, Lyrics, Page, Target, Track};
+use player::{PlaybackState, Player};
+use router::Route;
+use state::{Fetch, FpsMeter, Load, NowTab, shuffle_tracks};
+use ui::ImageCache;
 
 /// Resolution of the seek slider, which tracks playback as a ratio of the duration.
 pub const PROGRESS_STEPS: f32 = 1000.0;
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Route {
-    Login,
-    Home,
-    Explore,
-    Library,
-    Search(String),
-    Browse { id: String, params: Option<String> },
-}
-
-impl Route {
-    pub fn key(&self) -> String {
-        match self {
-            Route::Login => "login".into(),
-            Route::Home => "home".into(),
-            Route::Explore => "explore".into(),
-            Route::Library => "library".into(),
-            Route::Search(q) => format!("search:{q}"),
-            Route::Browse { id, params } => format!("browse:{id}:{}", params.as_deref().unwrap_or("")),
-        }
-    }
-}
-
-/// Debug FPS counter (F12, or `TOYOU_FPS=1`). While shown, the window redraws continuously,
-/// so it reports how fast the current screen *can* be drawn, not only how often it changes.
-#[derive(Default)]
-pub struct FpsMeter {
-    frames: VecDeque<Instant>,
-    build_time: Duration,
-}
-
-impl FpsMeter {
-    pub fn record_frame(&mut self, build_time: Duration) {
-        let now = Instant::now();
-        self.frames.push_back(now);
-        while self.frames.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(1)) {
-            self.frames.pop_front();
-        }
-        self.build_time = build_time;
-    }
-
-    /// Frames in the last second, average frame time, and time spent building the UI tree.
-    pub fn stats(&self) -> (usize, f32, f32) {
-        let frame_ms = match (self.frames.front(), self.frames.back()) {
-            (Some(first), Some(last)) if self.frames.len() > 1 => {
-                last.duration_since(*first).as_secs_f32() * 1000.0 / (self.frames.len() - 1) as f32
-            }
-            _ => 0.0,
-        };
-        (self.frames.len(), frame_ms, self.build_time.as_secs_f32() * 1000.0)
-    }
-}
 
 /// The cached page area (current page or sign-in). Renders through `MusicApp`.
 pub struct PageView {
@@ -82,8 +31,8 @@ pub struct SidebarView {
 }
 
 impl Render for PageView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = self.app.update(cx, |app, cx| app.render_main(cx)).ok();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.app.update(cx, |app, cx| app.render_main(window, cx)).ok();
         div().size_full().flex().flex_col().children(content)
     }
 }
@@ -93,12 +42,6 @@ impl Render for SidebarView {
         let content = self.app.update(cx, |app, cx| app.render_sidebar_element(cx)).ok();
         div().size_full().children(content)
     }
-}
-
-pub enum Load {
-    Loading,
-    Ready(Arc<Page>),
-    Failed(SharedString),
 }
 
 pub struct MusicApp {
@@ -136,19 +79,35 @@ pub struct MusicApp {
     pub player_error: Option<SharedString>,
     pub playback: PlaybackState,
     pub queue: Vec<Track>,
+    /// What the queue plays from, e.g. "Giorgio by Moroder Mix" or an album's name.
+    pub queue_source: Option<String>,
+    pub now_tab: NowTab,
+    /// Lyrics and related items per video id, fetched when their tab is opened.
+    pub lyrics: HashMap<String, Fetch<Option<Arc<Lyrics>>>>,
+    pub related: HashMap<String, Fetch<Arc<Page>>>,
+    /// The synced-lyrics line being sung, and the scroll position of the lyrics list.
+    pub lyrics_line: Option<usize>,
+    /// The previously sung line, which animates back to the normal size.
+    pub lyrics_prev_line: Option<usize>,
+    pub lyrics_scroll: ScrollHandle,
+    /// While set, the lyrics view eases its scroll toward the active line every frame.
+    pub lyrics_anim_until: Cell<Option<Instant>>,
+    pub lyrics_last_frame: Cell<Option<Instant>>,
     pub current: Option<usize>,
     pub show_queue: bool,
-    seen_finished: u64,
-    seen_failed: u64,
+    pub(crate) seen_finished: u64,
+    pub(crate) seen_failed: u64,
+    /// The volume to go back to when unmuting.
+    pub(crate) unmuted_volume: Option<f64>,
     /// A song restored from the last session, not yet loaded: pressing play resumes it here.
-    resume_at: Option<f64>,
+    pub(crate) resume_at: Option<f64>,
     /// What was last written to disk (queue length, current song), and when.
-    last_saved: (usize, Option<String>, Instant),
-    loading_more: bool,
+    pub(crate) last_saved: (usize, Option<String>, Instant),
+    pub(crate) loading_more: bool,
     /// Songs that failed in a row; stops auto-skipping after a few.
-    consecutive_failures: u32,
-    seeking: bool,
-    extending_queue: bool,
+    pub(crate) consecutive_failures: u32,
+    pub(crate) seeking: bool,
+    pub(crate) extending_queue: bool,
 
     pub fps: Option<FpsMeter>,
     /// The open Ctrl+P / Ctrl+Shift+P palette, if any.
@@ -159,8 +118,8 @@ pub struct MusicApp {
     pub page_view: Entity<PageView>,
     pub sidebar_view: Entity<SidebarView>,
 
-    tasks: HashMap<&'static str, Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    pub(crate) tasks: HashMap<&'static str, Task<()>>,
+    pub(crate) _subscriptions: Vec<Subscription>,
 }
 
 impl MusicApp {
@@ -197,10 +156,14 @@ impl MusicApp {
                     }
                 }
             }),
-            cx.subscribe(&volume, |this, _, event: &SliderEvent, _| {
+            cx.subscribe(&volume, |this, _, event: &SliderEvent, cx| {
                 let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
                 let target = value.end() as f64;
                 this.with_player(|p| p.set_volume(target));
+                // Show the new percentage right away rather than on the next playback tick.
+                this.playback.volume = target;
+                this.unmuted_volume = None;
+                cx.notify();
             }),
         ];
 
@@ -233,10 +196,20 @@ impl MusicApp {
             player_error: None,
             playback: PlaybackState { idle: true, ..Default::default() },
             queue: Vec::new(),
+            queue_source: None,
+            now_tab: NowTab::UpNext,
+            lyrics: HashMap::new(),
+            related: HashMap::new(),
+            lyrics_line: None,
+            lyrics_prev_line: None,
+            lyrics_scroll: ScrollHandle::new(),
+            lyrics_anim_until: Cell::new(None),
+            lyrics_last_frame: Cell::new(None),
             current: None,
             show_queue: false,
             seen_finished: 0,
             seen_failed: 0,
+            unmuted_volume: None,
             resume_at: None,
             last_saved: (0, None, Instant::now()),
             loading_more: false,
@@ -257,10 +230,15 @@ impl MusicApp {
 
         // Poll the player a few times per second; cheap, and keeps the UI in sync.
         let poll = cx.spawn_in(window, async move |this, cx| {
+            let mut interval = Duration::from_millis(250);
             loop {
-                cx.background_executor().timer(Duration::from_millis(250)).await;
-                if this.update_in(cx, |this, window, cx| this.sync_playback(window, cx)).is_err() {
-                    break;
+                cx.background_executor().timer(interval).await;
+                match this.update_in(cx, |this, window, cx| {
+                    this.sync_playback(window, cx);
+                    this.poll_interval()
+                }) {
+                    Ok(next) => interval = next,
+                    Err(_) => break,
                 }
             }
         });
@@ -333,17 +311,19 @@ impl MusicApp {
         self.changed(cx);
     }
 
-    fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         let route = self.route.clone();
         let key = route.key();
-        if route == Route::Login || matches!(self.pages.get(&key), Some(Load::Ready(_) | Load::Loading)) {
+        if matches!(route, Route::Login | Route::NowPlaying)
+            || matches!(self.pages.get(&key), Some(Load::Ready(_) | Load::Loading))
+        {
             return;
         }
         self.pages.insert(key.clone(), Load::Loading);
         let client = self.client.clone();
         let request = cx.background_executor().spawn(async move {
             match route {
-                Route::Login => unreachable!(),
+                Route::Login | Route::NowPlaying => unreachable!(),
                 Route::Home => client.home(),
                 Route::Explore => client.explore(),
                 Route::Library => client.library(),
@@ -455,17 +435,13 @@ impl MusicApp {
                 .status()
                 .map_err(|e| format!("couldn't open the sign-in window ({}): {e}", exe.display()))?;
             match status.code() {
-                Some(crate::auth::LOGIN_EXIT_SIGNED_IN) => {
+                Some(auth::LOGIN_EXIT_SIGNED_IN) => {
                     Session::load().ok_or_else(|| "Signed in, but no YouTube session was saved".to_string())
                 }
-                Some(crate::auth::LOGIN_EXIT_CANCELLED) => Err("Sign-in window closed before finishing.".into()),
+                Some(auth::LOGIN_EXIT_CANCELLED) => Err("Sign-in window closed before finishing.".into()),
                 _ => Err("The sign-in window crashed. Try another sign-in method below.".into()),
             }
         });
-    }
-
-    pub fn login_with_browser(&mut self, browser: &'static str, cx: &mut Context<Self>) {
-        self.run_login(browser, cx, move || Session::import_from_browser(browser));
     }
 
     pub fn login_with_cookie_header(&mut self, cx: &mut Context<Self>) {
@@ -478,7 +454,7 @@ impl MusicApp {
         self.run_login("cookie", cx, move || Session::from_cookie_header(&header));
     }
 
-    fn run_login(
+    pub(crate) fn run_login(
         &mut self,
         method: &'static str,
         cx: &mut Context<Self>,
@@ -491,7 +467,7 @@ impl MusicApp {
         let message = match method {
             "google" => "Finish signing in in the window that just opened…",
             "cookie" => "Checking the session…",
-            _ => "Reading the session from your browser…",
+            _ => "Signing in…",
         };
         self.login_status = Some((message.into(), false));
         let request = cx.background_executor().spawn(async move {
@@ -534,7 +510,7 @@ impl MusicApp {
         self.changed(cx);
     }
 
-    fn set_session(&mut self, session: Option<Session>, cx: &mut Context<Self>) {
+    pub(crate) fn set_session(&mut self, session: Option<Session>, cx: &mut Context<Self>) {
         self.client = Client::new(session.clone());
         self.session = session;
         self.account = None;
@@ -569,7 +545,7 @@ impl MusicApp {
 
     // ---- Playback ---------------------------------------------------------------------
 
-    fn spawn_player(&mut self) {
+    pub(crate) fn spawn_player(&mut self) {
         self.player = None; // Drop the old player first so it releases the sound device.
         self.queue.clear();
         self.current = None;
@@ -592,8 +568,8 @@ impl MusicApp {
     }
 
     /// Brings back the last session's queue and song, paused where it was left.
-    fn restore_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(saved) = crate::persist::load() else { return };
+    pub(crate) fn restore_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(saved) = storage::load() else { return };
         if saved.volume > 0.0 {
             self.volume.update(cx, |slider, cx| slider.set_value(saved.volume as f32, window, cx));
             self.with_player(|p| p.set_volume(saved.volume));
@@ -601,6 +577,7 @@ impl MusicApp {
         }
         self.queue = saved.queue;
         self.current = saved.current;
+        self.queue_source = saved.source;
         if let Some(track) = self.current_track() {
             let duration = track.duration_secs().unwrap_or(0.0);
             self.resume_at = Some(saved.position.min(duration.max(saved.position)));
@@ -612,16 +589,17 @@ impl MusicApp {
     }
 
     pub fn save_state(&self) {
-        crate::persist::save(&crate::persist::SavedState {
+        storage::save(&storage::SavedState {
             queue: self.queue.clone(),
             current: self.current,
+            source: self.queue_source.clone(),
             position: self.resume_at.unwrap_or(self.playback.position),
             volume: self.playback.volume,
         });
     }
 
     /// Saves when the queue or current song changed, or every 10 s while playing.
-    fn save_if_needed(&mut self) {
+    pub(crate) fn save_if_needed(&mut self) {
         let fingerprint = (self.queue.len(), self.current_track().map(|t| t.video_id.clone()));
         let playing = !self.playback.paused && !self.playback.idle;
         let (len, current, at) = &self.last_saved;
@@ -636,7 +614,7 @@ impl MusicApp {
         self.current.and_then(|ix| self.queue.get(ix))
     }
 
-    fn sync_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn sync_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(player) = &self.player else { return };
         let mut state = player.state();
         if let Some(at) = self.resume_at {
@@ -675,7 +653,87 @@ impl MusicApp {
             cx.notify();
         }
         self.playback = state;
+        self.follow_lyrics(cx);
         self.save_if_needed();
+    }
+
+    /// Poll quicker while synced lyrics are on screen, so line changes land on time.
+    pub(crate) fn poll_interval(&self) -> Duration {
+        if self.route == Route::NowPlaying && self.now_tab == NowTab::Lyrics {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(250)
+        }
+    }
+
+    /// Keeps synced lyrics on the line being sung. The lyrics view then animates the line's
+    /// size and eases the scroll toward it frame by frame (see `step_lyrics_scroll`).
+    pub(crate) fn follow_lyrics(&mut self, cx: &mut Context<Self>) {
+        if self.route != Route::NowPlaying || self.now_tab != NowTab::Lyrics {
+            return;
+        }
+        let video_id = self.current_track().map(|t| t.video_id.clone());
+        let line = match video_id.and_then(|id| self.lyrics.get(&id)) {
+            Some(Fetch::Ready(Some(lyrics))) if lyrics.synced() => {
+                lyrics.line_at((self.playback.position * 1000.0) as u64)
+            }
+            _ => None,
+        };
+        let changed = line != self.lyrics_line;
+        if changed {
+            self.lyrics_prev_line = self.lyrics_line;
+            self.lyrics_line = line;
+        }
+        // Also catch drift (e.g. a window resize) while no animation is running.
+        let off_center = line.is_some_and(|ix| self.lyrics_scroll_target(ix).is_some_and(|y| (y - self.lyrics_scroll.offset().y).abs() > px(1.0)));
+        if changed || (off_center && self.lyrics_anim_until.get().is_none()) {
+            self.lyrics_anim_until.set(Some(Instant::now() + Duration::from_millis(700)));
+            self.page_view.update(cx, |_, cx| cx.notify());
+        }
+    }
+
+    /// The scroll offset that puts the line in the middle of the lyrics view.
+    pub(crate) fn lyrics_scroll_target(&self, ix: usize) -> Option<Pixels> {
+        let handle = &self.lyrics_scroll;
+        let item = handle.bounds_for_item(ix)?;
+        // Child bounds come from layout, i.e. before scrolling, so the target doesn't depend on
+        // the current offset.
+        let viewport = handle.bounds();
+        Some((viewport.center().y - item.center().y).clamp(-handle.max_offset().y, px(0.0)))
+    }
+
+    /// One frame of easing the lyrics scroll toward the active line. Returns whether to keep
+    /// animating. Called while rendering the lyrics view.
+    pub fn step_lyrics_scroll(&self) -> bool {
+        let Some(until) = self.lyrics_anim_until.get() else { return false };
+        let now = Instant::now();
+        // Frame-rate independent exponential smoothing.
+        let dt = self.lyrics_last_frame.replace(Some(now)).map_or(1.0 / 60.0, |last| (now - last).as_secs_f32().min(0.1));
+        let mut settled = true;
+        if let Some(target) = self.lyrics_line.and_then(|ix| self.lyrics_scroll_target(ix)) {
+            let offset = self.lyrics_scroll.offset();
+            let follow = 1.0 - (-dt * 9.0).exp();
+            let y = offset.y + (target - offset.y) * follow;
+            settled = (target - y).abs() < px(0.5);
+            self.lyrics_scroll.set_offset(point(offset.x, if settled { target } else { y }));
+        }
+        if now < until || !settled {
+            true
+        } else {
+            self.lyrics_anim_until.set(None);
+            self.lyrics_last_frame.set(None);
+            false
+        }
+    }
+
+    /// Jumps playback to a synced lyrics line.
+    pub fn seek_to_lyric(&mut self, start_ms: u64, cx: &mut Context<Self>) {
+        let seconds = start_ms as f64 / 1000.0;
+        match &mut self.resume_at {
+            Some(at) => *at = seconds,
+            None => self.with_player(|p| p.seek_to(seconds)),
+        }
+        cx.notify();
     }
 
     pub fn play_queue(&mut self, tracks: Vec<Track>, start: usize, cx: &mut Context<Self>) {
@@ -694,17 +752,22 @@ impl MusicApp {
         self.current = Some(ix);
         self.playback.position = 0.0;
         self.playback.duration = 0.0;
+        self.lyrics_line = None;
+        self.lyrics_prev_line = None;
+        self.lyrics_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.load_now_playing_extras(cx);
         self.changed(cx);
     }
 
     /// Plays a single song followed by YouTube Music's suggestions for it.
     pub fn play_radio(&mut self, track: Track, cx: &mut Context<Self>) {
         let video_id = track.video_id.clone();
+        self.queue_source = Some(format!("{} radio", track.title));
         self.play_queue(vec![track], 0, cx);
         let client = self.client.clone();
         let request = cx.background_executor().spawn({
             let video_id = video_id.clone();
-            async move { client.up_next(Some(&video_id), None) }
+            async move { client.up_next_queue(Some(&video_id), None) }
         });
         let task = cx.spawn(async move |this, cx| {
             let Ok(suggestions) = request.await else { return };
@@ -713,7 +776,10 @@ impl MusicApp {
                 if this.current_track().map(|t| &t.video_id) == Some(&video_id) {
                     let ix = this.current.unwrap_or(0);
                     this.queue.truncate(ix + 1);
-                    this.queue.extend(suggestions.into_iter().filter(|t| t.video_id != video_id));
+                    this.queue.extend(suggestions.tracks.into_iter().filter(|t| t.video_id != video_id));
+                    if suggestions.source.is_some() {
+                        this.queue_source = suggestions.source;
+                    }
                     this.changed(cx);
                 }
             })
@@ -727,11 +793,14 @@ impl MusicApp {
         let client = self.client.clone();
         let request = cx
             .background_executor()
-            .spawn(async move { client.up_next(video_id.as_deref(), playlist_id.as_deref()) });
+            .spawn(async move { client.up_next_queue(video_id.as_deref(), playlist_id.as_deref()) });
         let task = cx.spawn(async move |this, cx| {
             let result = request.await;
             this.update(cx, |this, cx| match result {
-                Ok(tracks) if !tracks.is_empty() => this.play_queue(tracks, 0, cx),
+                Ok(queue) if !queue.tracks.is_empty() => {
+                    this.queue_source = queue.source;
+                    this.play_queue(queue.tracks, 0, cx)
+                }
                 _ => {
                     this.player_error = Some("Couldn't load that queue".into());
                     this.changed(cx);
@@ -746,10 +815,95 @@ impl MusicApp {
     pub fn play_from_page(&mut self, index: usize, shuffle: bool, cx: &mut Context<Self>) {
         let Some(Load::Ready(page)) = self.pages.get(&self.route.key()) else { return };
         let mut tracks = page.tracks();
+        self.queue_source = page.header.as_ref().map(|h| h.title.clone());
         if shuffle {
             shuffle_tracks(&mut tracks);
         }
         self.play_queue(tracks, index, cx);
+    }
+
+    /// Opens the Now playing view, or goes back from it.
+    pub fn toggle_now_playing(&mut self, cx: &mut Context<Self>) {
+        if self.route == Route::NowPlaying {
+            if self.back.is_empty() {
+                self.navigate(Route::Home, cx);
+            } else {
+                self.go_back(cx);
+            }
+        } else {
+            self.navigate(Route::NowPlaying, cx);
+            self.load_now_playing_extras(cx);
+        }
+    }
+
+    pub fn set_now_tab(&mut self, tab: NowTab, cx: &mut Context<Self>) {
+        self.now_tab = tab;
+        self.lyrics_line = None; // Re-centers on the current line once the list is laid out.
+        self.load_now_playing_extras(cx);
+        self.changed(cx);
+    }
+
+    /// Fetches lyrics or related items for the current song when their tab is showing.
+    pub fn load_now_playing_extras(&mut self, cx: &mut Context<Self>) {
+        if self.route != Route::NowPlaying {
+            return;
+        }
+        let Some(video_id) = self.current_track().map(|t| t.video_id.clone()) else { return };
+        let client = self.client.clone();
+        match self.now_tab {
+            NowTab::UpNext => {}
+            NowTab::Lyrics if !self.lyrics.contains_key(&video_id) => {
+                self.lyrics.insert(video_id.clone(), Fetch::Loading);
+                let request = cx.background_executor().spawn({
+                    let video_id = video_id.clone();
+                    async move {
+                        match client.watch_info(&video_id)?.lyrics_id {
+                            Some(id) => client.lyrics(&id),
+                            None => Ok(None),
+                        }
+                    }
+                });
+                cx.spawn(async move |this, cx| {
+                    let result = request.await;
+                    this.update(cx, |this, cx| {
+                        let fetch = match result {
+                            Ok(lyrics) => Fetch::Ready(lyrics.map(Arc::new)),
+                            Err(e) => Fetch::Failed(e.into()),
+                        };
+                        this.lyrics.insert(video_id, fetch);
+                        this.changed(cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            NowTab::Related if !self.related.contains_key(&video_id) => {
+                self.related.insert(video_id.clone(), Fetch::Loading);
+                let request = cx.background_executor().spawn({
+                    let video_id = video_id.clone();
+                    async move {
+                        match client.watch_info(&video_id)?.related_id {
+                            Some(id) => client.browse(&id, None),
+                            None => Ok(Page::default()),
+                        }
+                    }
+                });
+                cx.spawn(async move |this, cx| {
+                    let result = request.await;
+                    this.update(cx, |this, cx| {
+                        let fetch = match result {
+                            Ok(page) => Fetch::Ready(Arc::new(page)),
+                            Err(e) => Fetch::Failed(e.into()),
+                        };
+                        this.related.insert(video_id, fetch);
+                        this.changed(cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            _ => {}
+        }
     }
 
     pub fn toggle_fps(&mut self, cx: &mut Context<Self>) {
@@ -757,6 +911,28 @@ impl MusicApp {
             Some(_) => None,
             None => Some(FpsMeter::default()),
         };
+        cx.notify();
+    }
+
+    /// Mutes, or restores the volume from before muting.
+    pub fn toggle_mute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = match self.unmuted_volume.take() {
+            Some(previous) if self.playback.volume <= 0.0 => previous,
+            _ if self.playback.volume <= 0.0 => 70.0,
+            _ => {
+                let previous = self.playback.volume;
+                // Set after the slider update below, which clears it.
+                self.volume.update(cx, |slider, cx| slider.set_value(0.0, window, cx));
+                self.with_player(|p| p.set_volume(0.0));
+                self.playback.volume = 0.0;
+                self.unmuted_volume = Some(previous);
+                cx.notify();
+                return;
+            }
+        };
+        self.volume.update(cx, |slider, cx| slider.set_value(target as f32, window, cx));
+        self.with_player(|p| p.set_volume(target));
+        self.playback.volume = target;
         cx.notify();
     }
 
@@ -798,7 +974,7 @@ impl MusicApp {
     }
 
     /// When the queue runs out, keep the music going with suggestions for the last song.
-    fn extend_with_suggestions(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn extend_with_suggestions(&mut self, cx: &mut Context<Self>) {
         let Some(last) = self.queue.last().map(|t| t.video_id.clone()) else { return };
         if self.extending_queue {
             return;
@@ -833,20 +1009,5 @@ impl MusicApp {
             shuffle_tracks(&mut self.queue[start..]);
             self.changed(cx);
         }
-    }
-}
-
-/// Fisher–Yates with a tiny xorshift seeded from the clock; good enough for a playlist.
-fn shuffle_tracks(tracks: &mut [Track]) {
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x2545F4914F6CDD1D)
-        | 1;
-    for i in (1..tracks.len()).rev() {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        tracks.swap(i, (seed % (i as u64 + 1)) as usize);
     }
 }

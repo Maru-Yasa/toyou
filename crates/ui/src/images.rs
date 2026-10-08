@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::Arc;
 
-use gpui_kit::{Context, Image, ImageFormat, Task};
+use gpui_kit::{Context, Hsla, Image, ImageFormat, Task, hsla};
 
 const FETCH_THREADS: usize = 6;
 /// Loaded images kept in memory; the oldest are evicted beyond this. Covers are requested at
@@ -18,7 +18,8 @@ const MAX_LOADED: usize = 300;
 
 enum Slot {
     Loading,
-    Ready(Arc<Image>),
+    /// The image and its color (see [`tint_of`]).
+    Ready(Arc<Image>, Option<Hsla>),
     Failed,
 }
 
@@ -33,7 +34,7 @@ pub struct ImageCache {
 impl ImageCache {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let (jobs, job_rx) = flume::unbounded::<String>();
-        let (done_tx, done_rx) = flume::unbounded::<(String, Option<Image>)>();
+        let (done_tx, done_rx) = flume::unbounded::<(String, Option<(Image, Option<Hsla>)>)>();
         for _ in 0..FETCH_THREADS {
             let (job_rx, done_tx) = (job_rx.clone(), done_tx.clone());
             // Workers exit once the cache (and so the job sender) is dropped.
@@ -56,7 +57,7 @@ impl ImageCache {
                         let slot = match image {
                             Some(image) => {
                                 this.loaded.push_back(url.clone());
-                                Slot::Ready(Arc::new(image))
+                                Slot::Ready(Arc::new(image.0), image.1)
                             }
                             None => Slot::Failed,
                         };
@@ -79,7 +80,7 @@ impl ImageCache {
     fn evict(&mut self, cx: &mut Context<Self>) {
         while self.loaded.len() > MAX_LOADED {
             let Some(url) = self.loaded.pop_front() else { break };
-            if let Some(Slot::Ready(image)) = self.slots.remove(&url) {
+            if let Some(Slot::Ready(image, _)) = self.slots.remove(&url) {
                 image.remove_asset(cx);
             }
         }
@@ -88,7 +89,15 @@ impl ImageCache {
     /// The image, if it has been downloaded. Never starts a download.
     pub fn peek(&self, url: &str) -> Option<Arc<Image>> {
         match self.slots.get(url) {
-            Some(Slot::Ready(image)) => Some(image.clone()),
+            Some(Slot::Ready(image, _)) => Some(image.clone()),
+            _ => None,
+        }
+    }
+
+    /// The dominant color of a downloaded image, for tinting what surrounds it.
+    pub fn tint(&self, url: &str) -> Option<Hsla> {
+        match self.slots.get(url) {
+            Some(Slot::Ready(_, tint)) => *tint,
             _ => None,
         }
     }
@@ -123,7 +132,7 @@ pub fn sized_url(url: &str, size: u32) -> String {
     url.to_string()
 }
 
-fn fetch(url: &str) -> Option<Image> {
+fn fetch(url: &str) -> Option<(Image, Option<Hsla>)> {
     let mut bytes = Vec::new();
     ureq::get(url).call().ok()?.into_reader().take(4 << 20).read_to_end(&mut bytes).ok()?;
     let format = match bytes.as_slice() {
@@ -133,5 +142,25 @@ fn fetch(url: &str) -> Option<Image> {
         [b'G', b'I', b'F', ..] => ImageFormat::Gif,
         _ => return None,
     };
-    Some(Image::from_bytes(format, bytes))
+    let tint = tint_of(&bytes);
+    Some((Image::from_bytes(format, bytes), tint))
+}
+
+/// An image's color: the average of a tiny copy, weighted toward saturated pixels so a
+/// white or grey background doesn't wash it out, then nudged to a usable glow color.
+fn tint_of(bytes: &[u8]) -> Option<Hsla> {
+    let small = image::load_from_memory(bytes).ok()?.thumbnail(24, 24).to_rgb8();
+    let (mut sum, mut weight) = ([0.0f32; 3], 0.0f32);
+    for px in small.pixels() {
+        let [r, g, b] = px.0.map(|c| c as f32 / 255.0);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let w = 0.15 + (max - min);
+        sum = [sum[0] + r * w, sum[1] + g * w, sum[2] + b * w];
+        weight += w;
+    }
+    if weight == 0.0 {
+        return None;
+    }
+    let color: Hsla = gpui_kit::Rgba { r: sum[0] / weight, g: sum[1] / weight, b: sum[2] / weight, a: 1.0 }.into();
+    Some(hsla(color.h, color.s.max(0.35), color.l.clamp(0.35, 0.6), 1.0))
 }

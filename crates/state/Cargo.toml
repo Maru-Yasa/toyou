@@ -1,0 +1,10 @@
+[package]
+name = "state"
+description = "Plain state types shared by the views."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui-kit.workspace = true
+music.workspace = true

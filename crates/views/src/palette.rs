@@ -10,12 +10,12 @@ use gpui_kit::component::IndexPath;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::api::{Item, Section};
+use music::{Item, Section};
 use crate::app::MusicApp;
-use crate::ui::{Palette, thumb_element};
-use crate::{
+use ui::{Palette, thumb_element};
+use input::{
     FocusSearch, GoBack, GoExplore, GoHome, GoLibrary, NextTrack, PrevTrack, RefreshPage, ShuffleUpNext, SignIn,
-    SignOut, ToggleFps, TogglePlay, ToggleQueue,
+    SignOut, ToggleFps, ToggleNowPlaying, TogglePlay, ToggleQueue,
 };
 
 /// How long typing must pause before a search is sent.
@@ -64,7 +64,7 @@ impl MusicApp {
     }
 
     /// With an empty query, the song palette offers your playlists for quick jumping.
-    fn playlist_sections(&self) -> Vec<Section> {
+    pub(crate) fn playlist_sections(&self) -> Vec<Section> {
         if self.playlists.is_empty() {
             return Vec::new();
         }
@@ -72,7 +72,7 @@ impl MusicApp {
         vec![Section { title: "Your playlists".into(), items }]
     }
 
-    fn palette_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn palette_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         let playlists = self.playlist_sections();
         let Some(palette) = &mut self.palette else { return };
         palette.query = query.trim().to_string();
@@ -115,7 +115,7 @@ impl MusicApp {
     }
 
     /// Plays or opens the chosen song-palette result.
-    fn palette_confirm(&mut self, index: IndexPath, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn palette_confirm(&mut self, index: IndexPath, window: &mut Window, cx: &mut Context<Self>) {
         let Some(palette) = self.palette.take() else { return };
         self.focus.focus(window, cx);
         cx.notify();
@@ -201,7 +201,7 @@ impl MusicApp {
             .into_any_element()
     }
 
-    fn song_row(&self, item: &Item, p: Palette) -> CommandItem {
+    pub(crate) fn song_row(&self, item: &Item, p: Palette) -> CommandItem {
         let (images, scale) = (self.images.clone(), self.scale_factor.get());
         let (title, subtitle, thumbnail, kind, round) = match item {
             Item::Track(t) => {
@@ -232,7 +232,7 @@ impl MusicApp {
 
     /// Everything toyou can do, as palette entries. Each is an action, so the palette
     /// dispatches it on Enter and shows its keyboard shortcut.
-    fn commands(&self) -> Vec<CommandItem> {
+    pub(crate) fn commands(&self) -> Vec<CommandItem> {
         let signed_in = self.session.is_some();
         let mut items = vec![
             entry("Go to Home", IconName::House, GoHome, &["navigate"]),
@@ -243,6 +243,7 @@ impl MusicApp {
         }
         items.extend([
             entry("Go back", IconName::ChevronLeft, GoBack, &["navigate", "previous page"]),
+            entry("Show now playing", IconName::Disc3, ToggleNowPlaying, &["lyrics", "related", "up next", "artwork"]),
             entry("Play / pause", IconName::Play, TogglePlay, &["playback", "resume", "stop"]),
             entry("Next song", IconName::SkipForward, NextTrack, &["playback", "skip"]),
             entry("Previous song", IconName::SkipBack, PrevTrack, &["playback", "restart"]),

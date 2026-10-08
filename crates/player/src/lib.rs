@@ -1,5 +1,6 @@
-//! toyou's own audio player: yt-dlp resolves a song to YouTube's AAC stream, which is
-//! downloaded in ranged chunks, decoded by symphonia and played through rodio/cpal.
+//! toyou's own audio player: a song is resolved to YouTube's AAC stream straight from the
+//! InnerTube `player` endpoint, downloaded in ranged chunks, decoded by symphonia and played
+//! through rodio/cpal. No external programs.
 //!
 //! Threads:
 //! - the *audio thread* owns the output device and the rodio `Player`, and handles commands;
@@ -10,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,6 +20,8 @@ use serde_json::Value;
 
 /// Download granularity for the stream buffer.
 const CHUNK: u64 = 1 << 20;
+/// How many times a chunk is requested before the download fails.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
 /// Resolved stream URLs expire after ~6 hours; re-resolve well before that.
 const RESOLVE_TTL: Duration = Duration::from_secs(60 * 60);
 const TICK: Duration = Duration::from_millis(100);
@@ -167,11 +169,15 @@ fn audio_thread(
                 }
                 let (loopback, load_generation) = (loopback.clone(), generation);
                 thread::spawn(move || {
-                    let message = match open(&url) {
+                    let message = match open_with_retry(&url) {
                         Ok((decoder, duration)) => {
                             PlayerCommand::Loaded { generation: load_generation, decoder, duration, start_at, paused }
                         }
-                        Err(error) => PlayerCommand::LoadFailed { generation: load_generation, error },
+                        Err(error) => {
+                            // The player bar shortens messages; keep the full one on the terminal.
+                            eprintln!("toyou: couldn't play {url}: {error}");
+                            PlayerCommand::LoadFailed { generation: load_generation, error }
+                        }
                     };
                     let _ = loopback.send(message);
                 });
@@ -247,37 +253,130 @@ fn resolve_cache() -> &'static Mutex<HashMap<String, (Resolved, Instant)>> {
     CACHE.get_or_init(Default::default)
 }
 
-/// Asks yt-dlp for the AAC (m4a) stream of a song. No download happens here.
+/// The YouTube client asked for streams. Its URLs work as they are: no signature to decode, no
+/// proof-of-origin token, and every byte range is served (other clients cut off after ~1 MB).
+const STREAM_CLIENT: &str = "VISIONOS";
+const STREAM_CLIENT_ID: &str = "101";
+const STREAM_CLIENT_VERSION: &str = "1.02";
+const STREAM_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+const INNERTUBE: &str = "https://www.youtube.com/youtubei/v1";
+/// AAC in MP4, which symphonia decodes in pure Rust.
+const AAC_ITAG: u64 = 140;
+
+/// Finds the AAC stream of a song (`watch_url` is a `…/watch?v=<id>` link). No download
+/// happens here.
 fn resolve(watch_url: &str) -> Result<Resolved, String> {
     if let Some((resolved, at)) = resolve_cache().lock().unwrap().get(watch_url) {
         if at.elapsed() < RESOLVE_TTL {
             return Ok(resolved.clone());
         }
     }
-    let output = Command::new("yt-dlp")
-        .args(["-f", "140/bestaudio[ext=m4a]", "-j", "--no-playlist", "--no-warnings", watch_url])
-        .output()
-        .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => "yt-dlp isn't installed".to_string(),
-            _ => format!("couldn't run yt-dlp: {e}"),
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let line = stderr.lines().rev().find(|l| l.contains("ERROR")).unwrap_or("yt-dlp failed");
-        return Err(line.trim_start_matches("ERROR: ").to_string());
-    }
-    let info: Value = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
-    let resolved = Resolved {
-        url: info["url"].as_str().ok_or("yt-dlp returned no stream URL")?.to_string(),
-        headers: info["http_headers"]
-            .as_object()
-            .map(|h| h.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
-            .unwrap_or_default(),
-        size: info["filesize"].as_u64(),
-        duration: info["duration"].as_f64().unwrap_or(0.0),
-    };
+    let video_id = watch_url
+        .split(['?', '&'])
+        .find_map(|part| part.strip_prefix("v="))
+        .ok_or("not a song link")?;
+    // YouTube refuses requests without a visitor id ("confirm you're not a bot"); if the
+    // cached one stopped working, try once more with a fresh one.
+    let resolved = player_request(video_id, &visitor_id(false)?)
+        .or_else(|_| player_request(video_id, &visitor_id(true)?))?;
     resolve_cache().lock().unwrap().insert(watch_url.to_string(), (resolved.clone(), Instant::now()));
     Ok(resolved)
+}
+
+/// A guest visitor id: the session identity YouTube expects with every request.
+/// Fetched once and reused; `fresh` replaces it.
+fn visitor_id(fresh: bool) -> Result<String, String> {
+    static VISITOR: Mutex<Option<String>> = Mutex::new(None);
+    let mut cached = VISITOR.lock().unwrap();
+    if let (false, Some(id)) = (fresh, cached.as_ref()) {
+        return Ok(id.clone());
+    }
+    let response: Value = ureq::post(&format!("{INNERTUBE}/visitor_id?prettyPrint=false"))
+        .timeout(Duration::from_secs(15))
+        .send_json(serde_json::json!({
+            "context": { "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en" } }
+        }))
+        .map_err(|e| format!("couldn't reach YouTube: {e}"))?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    let id = response
+        .pointer("/responseContext/visitorData")
+        .and_then(Value::as_str)
+        .ok_or("YouTube didn't return a visitor id")?
+        .to_string();
+    *cached = Some(id.clone());
+    Ok(id)
+}
+
+fn player_request(video_id: &str, visitor: &str) -> Result<Resolved, String> {
+    let body = serde_json::json!({
+        "context": {
+            "client": {
+                "clientName": STREAM_CLIENT,
+                "clientVersion": STREAM_CLIENT_VERSION,
+                "deviceMake": "Apple",
+                "deviceModel": "RealityDevice17,1",
+                "osName": "visionOS",
+                "osVersion": "26.5.23O471",
+                "userAgent": STREAM_USER_AGENT,
+                "visitorData": visitor,
+                "hl": "en",
+            }
+        },
+        "videoId": video_id,
+        "contentCheckOk": true,
+        "racyCheckOk": true,
+    });
+    let response: Value = ureq::post(&format!("{INNERTUBE}/player?prettyPrint=false"))
+        .timeout(Duration::from_secs(20))
+        .set("User-Agent", STREAM_USER_AGENT)
+        .set("X-YouTube-Client-Name", STREAM_CLIENT_ID)
+        .set("X-YouTube-Client-Version", STREAM_CLIENT_VERSION)
+        .set("X-Goog-Visitor-Id", visitor)
+        .set("Origin", "https://www.youtube.com")
+        .send_json(body)
+        .map_err(|e| format!("couldn't reach YouTube: {e}"))?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+
+    let status = response.pointer("/playabilityStatus/status").and_then(Value::as_str).unwrap_or("");
+    if status != "OK" {
+        let reason = response.pointer("/playabilityStatus/reason").and_then(Value::as_str);
+        return Err(reason.unwrap_or("YouTube won't play this song").to_string());
+    }
+    let formats = response
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(Value::as_array)
+        .ok_or("no audio streams for this song")?;
+    let is_aac = |f: &&Value| {
+        f.get("url").is_some() && f.get("mimeType").and_then(Value::as_str).is_some_and(|m| m.starts_with("audio/mp4"))
+    };
+    let format = formats
+        .iter()
+        .filter(is_aac)
+        .find(|f| f.get("itag").and_then(Value::as_u64) == Some(AAC_ITAG))
+        .or_else(|| formats.iter().filter(is_aac).max_by_key(|f| f.get("bitrate").and_then(Value::as_u64)))
+        .ok_or("no AAC audio stream for this song")?;
+
+    let number = |v: Option<&Value>| v.and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()));
+    Ok(Resolved {
+        url: format["url"].as_str().unwrap_or_default().to_string(),
+        headers: vec![("User-Agent".into(), STREAM_USER_AGENT.into())],
+        size: number(format.get("contentLength")),
+        duration: number(format.get("approxDurationMs")).map_or(0.0, |ms| ms as f64 / 1000.0),
+    })
+}
+
+/// Opens a song, trying once more with a fresh stream link and visitor id if the first attempt
+/// fails: YouTube can refuse a link, or a download can drop while the decoder reads the header.
+fn open_with_retry(watch_url: &str) -> Result<(Decoder<HttpStream>, f64), String> {
+    open(watch_url).or_else(|first| {
+        resolve_cache().lock().unwrap().remove(watch_url);
+        let _ = visitor_id(true);
+        thread::sleep(Duration::from_millis(300));
+        open(watch_url).map_err(|second| if second == first { second } else { format!("{second} (first try: {first})") })
+    })
 }
 
 fn open(watch_url: &str) -> Result<(Decoder<HttpStream>, f64), String> {
@@ -315,7 +414,7 @@ struct HttpStream {
 
 impl HttpStream {
     fn open(resolved: &Resolved) -> Result<Self, String> {
-        // The first chunk also tells us the total size when yt-dlp didn't.
+        // The first chunk also tells us the total size when YouTube didn't list it.
         let (first, total) = fetch_range(resolved, 0, CHUNK - 1)?;
         let len = resolved.size.or(total).ok_or("unknown stream size")?;
         let mut buffer = Buffer { data: Vec::with_capacity(len as usize), ..Default::default() };
@@ -330,7 +429,15 @@ impl HttpStream {
                 // Stop if the song was skipped and the reader dropped.
                 let Some(shared) = download.upgrade() else { return };
                 let end = (offset + CHUNK).min(len) - 1;
-                let result = fetch_range(&resolved, offset, end).or_else(|_| fetch_range(&resolved, offset, end));
+                // A chunk gets a few tries before the song gives up: connections do drop.
+                let mut result = fetch_range(&resolved, offset, end);
+                for attempt in 1..DOWNLOAD_ATTEMPTS {
+                    if result.is_ok() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(400 * attempt as u64));
+                    result = fetch_range(&resolved, offset, end);
+                }
                 let (lock, ready) = &*shared;
                 let mut buffer = lock.lock().unwrap();
                 match result {
@@ -414,7 +521,7 @@ fn fetch_range(resolved: &Resolved, start: u64, end: u64) -> Result<(Vec<u8>, Op
 mod tests {
     use super::*;
 
-    /// Hits YouTube through yt-dlp; run with `cargo test -- --ignored --nocapture`.
+    /// Hits YouTube; run with `cargo test -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn live_decodes_and_seeks_youtube_aac() {

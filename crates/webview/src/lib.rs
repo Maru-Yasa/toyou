@@ -1,4 +1,4 @@
-//! The `toyou-login` program: a small native browser window (WebKitGTK via wry) for
+//! The Google sign-in window, run as the `toyou-login` program: a small native browser window (WebKitGTK via wry) for
 //! signing in to Google. It is a separate program because wry/tao drive their own GTK
 //! event loop, which can't share a window with GPUI, and so the main app never loads
 //! WebKit. Once YouTube's login cookies appear, they are saved for the main app and
@@ -11,7 +11,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::WindowBuilder;
 use wry::{WebContext, WebViewBuilder};
 
-use crate::auth::{self, CookieRecord, LOGIN_EXIT_CANCELLED, LOGIN_EXIT_SIGNED_IN, ORIGIN};
+use auth::{CookieRecord, LOGIN_EXIT_CANCELLED, LOGIN_EXIT_SIGNED_IN, ORIGIN};
 
 const SIGN_IN_URL: &str =
     "https://accounts.google.com/ServiceLogin?ltmpl=music&service=youtube&passive=true&continue=https%3A%2F%2Fmusic.youtube.com%2F";
